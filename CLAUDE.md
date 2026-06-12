@@ -17,7 +17,7 @@ CLI -> Collector -> HTTP Client -> Parser -> Model -> Exporter -> File
 ### Структура проекта
 
 ```
-goldenpages-scraper/
+gpuz-parser/
 ├── docs/
 │   ├── CONTEXT.md
 │   ├── TODO.md
@@ -32,16 +32,16 @@ goldenpages-scraper/
 │   ├── collectors/
 │   │   ├── rubric_collector.py
 │   │   ├── city_collector.py
-│   │   ├── keyword_collector.py
-│   │   ├── multi_rubric_collector.py
-│   │   └── excel_downloader.py  # Путь A: Excel-экспорт с сайта
+│   │   ├── keyword_collector.py      # ⚠️ не использовать — /search/* в Disallow
+│   │   └── multi_rubric_collector.py
 │   └── exporters/
 │       ├── csv_exporter.py
 │       └── excel_exporter.py
 ├── tests/
-│   ├── fixtures/              # сохранённые HTML-страницы для тестов
-│   ├── test_company_parser.py
-│   └── test_listing_parser.py
+│   ├── fixtures/
+│   │   └── veolia_energy_12988.htm   # реальный HTML компании (id=12988)
+│   ├── test_company_parser.py        # 35 тестов
+│   └── test_listing_parser.py        # 19 тестов
 ├── output/                    # в .gitignore
 ├── main.py                    # точка входа CLI
 └── pyproject.toml
@@ -65,11 +65,22 @@ GET /scripts/company_data/?cid={company_id}&ctype=phone&clang=ru
 ```
 Ответ — HTML-фрагмент со списком `<a href="tel:+998...">`. Номер берётся из атрибута `href` (чистый формат `+998XXXXXXXXX`).
 
-**Внешние ссылки:** сайты компаний скрыты за редиректом `/go/?u=HASH`. Резолвинг через HEAD-запрос или `title`-атрибут ссылки.
+**Внешние ссылки:** сайты компаний скрыты за редиректом `/go/?u=HASH`. Тип ссылки определяется по атрибуту `title`:
+- `title="Перейти на сайт"` — сайт компании; фактический URL находится в **тексте** ссылки (например `cabinet.veoliaenergy.uz`).
+- `title="Telegram"` — Telegram-канал; текст ссылки пустой (SVG-иконка), сохраняется редирект-URL.
+- Без `title` — навигационные ссылки сайта, игнорируются.
 
 **Пагинация рубрик:** классическая серверная, параметр `Page` (с заглавной буквы): `/rubrics/?Id=3473&Page=2`. Подтверждено через `Clean-param` в robots.txt.
 
 **Кнопка "Скачать список":** требует авторизации — **Путь A отклонён**.
+
+**Рабочие часы:** отображаются в `<div class="gp_work_wrap">` внутри контейнера `gp_work_time`. Дни с `fw-600` — заголовок (пропускать). Текущий день помечен дополнительным элементом `"Сегодня"`. Время в формате `09.00 - 18.00` (точка, не двоеточие), нормализуется при парсинге.
+
+**Рейтинг:** числовое значение в `<div class="review_all__count fw-600">`. Рядом: `<span>оценок: N | отзывов: N</span>`.
+
+**Лет на сайте:** текст может быть `"N лет"`, `"N года"` или `"N год"` на сайте — парсер обрабатывает все формы.
+
+**Рубрики:** в HTML присутствуют абсолютные URL навигационных рубрик (`https://www.goldenpages.uz/rubrics/?Id=...`) — они фильтруются, берутся только относительные (`/rubrics/?Id=...`).
 
 ---
 
@@ -126,7 +137,6 @@ GET /scripts/company_data/?cid={company_id}&ctype=phone&clang=ru
 ```bash
 python main.py --rubric 3473 --rubric 3778 --format both
 python main.py --city 296 --format xlsx --output output/tashkent
-python main.py --keyword "ресторан" --city 296 --format csv
 python main.py --rubric 3473 --limit 10   # тестовый прогон
 ```
 
@@ -134,7 +144,7 @@ python main.py --rubric 3473 --limit 10   # тестовый прогон
 |---------------|-------------------------------------------------|
 | `--rubric`    | ID рубрики (повторяется для нескольких)         |
 | `--city`      | ID города                                       |
-| `--keyword`   | Ключевое слово для POST-поиска                  |
+| `--keyword`   | Ключевое слово для POST-поиска ⚠️ заблокирован  |
 | `--output`    | Путь без расширения (default: `output/result`)  |
 | `--format`    | `csv`, `xlsx` или `both` (default: `both`)      |
 | `--limit`     | Максимум компаний (для тестирования)            |
@@ -164,24 +174,47 @@ pydantic = "^2.7"
 openpyxl = "^3.1"
 tenacity = "^8.3"
 rich = "^13.7"   # опционально
-# playwright = "^1.44"  — только если пагинация через JS (Путь C)
 ```
 
 ---
 
 ## Статус проекта
 
-Фаза 0 (разведка) завершена. **Реализуется Путь B.**
+**Все фазы 0–5 завершены. Фаза 6 в процессе (6.4 ожидает живого запуска).**
+
+### Фаза 0 — Разведка
 
 | ID   | Задача                                              | Приоритет | Статус               |
 |------|-----------------------------------------------------|-----------|----------------------|
-| 0.1  | Проверить `robots.txt`                              | HIGH      | ✅ Проверен — `/rubrics/`, `/company/`, `/city/` разрешены; `/search/*` заблокирован |
-| 0.2  | Установить механизм пагинации рубрик                | CRITICAL  | ✅ Серверная (Путь B) |
+| 0.1  | Проверить `robots.txt`                              | HIGH      | ✅ `/rubrics/`, `/company/`, `/city/` разрешены; `/search/*` заблокирован |
+| 0.2  | Установить механизм пагинации рубрик                | CRITICAL  | ✅ Серверная, параметр `Page` (с заглавной) |
 | 0.3  | Проверить кнопку "Скачать список"                   | CRITICAL  | ✅ Требует авторизации — Путь A отклонён |
-| 0.4  | Установить параметры POST-формы поиска              | MEDIUM    | ⛔ `/search/*` заблокирован в robots.txt — keyword_collector не должен использоваться |
+| 0.4  | Установить параметры POST-формы поиска              | MEDIUM    | ⛔ `/search/*` в Disallow — keyword_collector не используется |
 | 0.5  | Получение телефонов                                 | HIGH      | ✅ AJAX GET `/scripts/company_data/` |
-| 0.6  | Исследовать резолвинг `/go/?u=HASH`                 | MEDIUM    | ✅ URL берётся из текста ссылки (не из href-редиректа) |
+| 0.6  | Исследовать резолвинг `/go/?u=HASH`                 | MEDIUM    | ✅ URL в тексте ссылки; тип — по атрибуту `title` |
 | 0.7  | Собрать таблицу ID всех городов/регионов            | MEDIUM    | ✅ 13 областей, 300+ городов в `src/config.py` |
+
+### Фазы 1–6 — Реализация
+
+| ID    | Задача                                | Статус |
+|-------|---------------------------------------|--------|
+| 1.1–4 | Структура, pyproject.toml, models, config | ✅ |
+| 2.1   | `http_client.py`                      | ✅ |
+| 2.2   | `company_parser.py`                   | ✅ |
+| 2.3   | `listing_parser.py`                   | ✅ |
+| 3B.1  | `rubric_collector.py`                 | ✅ |
+| 3B.2  | `city_collector.py`                   | ✅ |
+| 3B.3  | `keyword_collector.py`                | ✅ (⚠️ не использовать) |
+| 3B.4  | `multi_rubric_collector.py`           | ✅ |
+| 4.1   | `csv_exporter.py`                     | ✅ |
+| 4.2   | `excel_exporter.py`                   | ✅ |
+| 5.1   | `main.py` CLI                         | ✅ |
+| 6.1   | Fixture HTML (`veolia_energy_12988.htm`) | ✅ |
+| 6.2   | `test_company_parser.py` (35 тестов)  | ✅ |
+| 6.3   | `test_listing_parser.py` (19 тестов)  | ✅ |
+| 6.4   | Тестовый прогон `--limit 5`           | ⬜ |
+
+**Итого: 69/69 тестов проходят.**
 
 ### Выбранная архитектура
 
@@ -195,8 +228,8 @@ rich = "^13.7"   # опционально
 
 - Агрессивный парсинг недопустим — обязательны паузы между запросами
 - `/search/*` заблокирован в `robots.txt` (`Disallow: */search/*`) — keyword-поиск запрещён
-- Внешние URL компаний не извлекаются напрямую из HTML
-- Телефоны в верхней части страницы замаскированы и требуют JS
+- ИНН на сайте частично маскируется (`30686****`) — парсер возвращает то, что есть
+- Telegram-ссылки не содержат читаемого URL (только SVG-иконка) — сохраняется редирект `/go/?u=HASH`
 - Полный текст отзывов за "Показать ещё" недоступен без JS
 
 Подробности: `docs/CONTEXT.md`, `docs/TODO.md`, `docs/ARCHITECTURE.md`.
