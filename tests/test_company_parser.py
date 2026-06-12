@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from src.parsers.company_parser import parse_company_page, parse_phones
+
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,8 +41,8 @@ FULL_COMPANY_HTML = """
     <tr><td>Вс</td><td>Выходной</td></tr>
   </table>
 
-  <a href="/go/?u=abc123" rel="nofollow noopener" target="_blank">www.teploenergo.uz</a>
-  <a href="/go/?u=def456" rel="nofollow noopener" target="_blank">t.me/teploenergo</a>
+  <a href="/go/?u=abc123" title="Перейти на сайт" rel="nofollow noopener" target="_blank">www.teploenergo.uz</a>
+  <a href="/go/?u=def456" title="Telegram" rel="nofollow noopener" target="_blank"></a>
 </body></html>
 """
 
@@ -120,7 +124,8 @@ def test_parse_full_company_website() -> None:
 
 def test_parse_full_company_telegram() -> None:
     company = parse_company_page(FULL_COMPANY_HTML, 57473)
-    assert company.telegram == "https://t.me/teploenergo"
+    # No text in telegram link — falls back to goldenpages redirect URL
+    assert company.telegram == "https://www.goldenpages.uz/go/?u=def456"
 
 
 # ---------------------------------------------------------------------------
@@ -225,15 +230,34 @@ def test_parse_rating_with_comma() -> None:
 
 
 def test_parse_website_already_has_scheme() -> None:
-    html = '<html><body><a href="/go/?u=x">https://example.com/path</a></body></html>'
+    html = '<html><body><a href="/go/?u=x" title="Перейти на сайт">https://example.com/path</a></body></html>'
     assert parse_company_page(html, 9).website == "https://example.com/path"
 
 
-def test_parse_only_telegram_no_website() -> None:
-    html = '<html><body><a href="/go/?u=x">t.me/channel</a></body></html>'
+def test_parse_website_without_scheme() -> None:
+    html = '<html><body><a href="/go/?u=x" title="Перейти на сайт">example.com</a></body></html>'
+    assert parse_company_page(html, 9).website == "https://example.com"
+
+
+def test_parse_telegram_with_text() -> None:
+    html = '<html><body><a href="/go/?u=x" title="Telegram">t.me/channel</a></body></html>'
     company = parse_company_page(html, 10)
     assert company.telegram == "https://t.me/channel"
     assert company.website is None
+
+
+def test_parse_telegram_icon_only() -> None:
+    html = '<html><body><a href="/go/?u=abc" title="Telegram"><svg/></a></body></html>'
+    company = parse_company_page(html, 11)
+    assert company.telegram == "https://www.goldenpages.uz/go/?u=abc"
+    assert company.website is None
+
+
+def test_parse_go_links_without_title_are_ignored() -> None:
+    html = '<html><body><a href="/go/?u=x">gpuzbot</a></body></html>'
+    company = parse_company_page(html, 12)
+    assert company.website is None
+    assert company.telegram is None
 
 
 def test_parse_alt_names_no_sibling() -> None:
@@ -246,9 +270,19 @@ def test_parse_building_no_street() -> None:
     assert parse_company_page(html, 12).building is None
 
 
-def test_parse_years_on_site_various_forms() -> None:
+def test_parse_years_on_site_let() -> None:
     html = "<html><body><span>3 лет на сайте</span></body></html>"
     assert parse_company_page(html, 13).years_on_site == 3
+
+
+def test_parse_years_on_site_goda() -> None:
+    html = "<html><body><span>23 года на сайте</span></body></html>"
+    assert parse_company_page(html, 14).years_on_site == 23
+
+
+def test_parse_years_on_site_god() -> None:
+    html = "<html><body><span>1 год на сайте</span></body></html>"
+    assert parse_company_page(html, 15).years_on_site == 1
 
 
 # ---------------------------------------------------------------------------
@@ -289,3 +323,76 @@ def test_parse_phones_empty() -> None:
 def test_parse_phones_no_tel_links() -> None:
     html = "<div><a href='/company/?Id=1'>Link</a></div>"
     assert parse_phones(html) == []
+
+
+# ---------------------------------------------------------------------------
+# Integration — real page fixture (VEOLIA ENERGY TASHKENT, id=12988)
+# ---------------------------------------------------------------------------
+
+def _load_veolia() -> str:
+    return (FIXTURES / "veolia_energy_12988.htm").read_text(encoding="utf-8")
+
+
+def test_real_fixture_name() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert c.name == '"VEOLIA ENERGY TASHKENT" ИП ООО'
+
+
+def test_real_fixture_alt_names() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert 'бывш. "TOSHISSIQQUVVATI" ГУП' in c.alt_names
+    assert "ТАШТЕПЛОЭНЕРГО (ГОРОДСКОЕ)" in c.alt_names
+
+
+def test_real_fixture_location() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert c.city == "Ташкент"
+    assert c.district == "Шайхонтохурский район"
+    assert c.street == "ул. Кукча Дарвоза"
+    assert c.building == "260"
+
+
+def test_real_fixture_rubrics() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert "Тепломонтажные работы" in c.activity_types
+    assert "Теплоснабжение - услуги" in c.activity_types
+    assert 3093 in c.rubric_ids
+    assert 1689 in c.rubric_ids
+    # Navigation rubrics must not bleed in
+    assert len(c.rubric_ids) == 2
+
+
+def test_real_fixture_inn_and_dates() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert c.inn is not None and c.inn.startswith("30686")
+    assert c.years_on_site == 23
+    assert c.last_updated == "26.04.2026"
+
+
+def test_real_fixture_rating_and_reviews() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert c.rating == 2.33
+    assert c.review_count == 3
+
+
+def test_real_fixture_working_hours() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert len(c.working_hours) == 7
+    weekdays = [wh for wh in c.working_hours if not wh.is_day_off]
+    assert len(weekdays) == 5
+    for wh in weekdays:
+        assert wh.open_time == "09:00"
+        assert wh.close_time == "18:00"
+    day_offs = [wh for wh in c.working_hours if wh.is_day_off]
+    assert len(day_offs) == 2
+
+
+def test_real_fixture_website() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert c.website == "https://cabinet.veoliaenergy.uz"
+
+
+def test_real_fixture_telegram_is_detected() -> None:
+    c = parse_company_page(_load_veolia(), 12988)
+    assert c.telegram is not None
+    assert "goldenpages.uz" in c.telegram or "t.me" in c.telegram
