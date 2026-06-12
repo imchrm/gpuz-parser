@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import csv
 from pathlib import Path
 
 from src.models import Company
 
-HEADERS = [
+COLUMNS: list[tuple[str, str]] = [
     ("name", "Название"),
     ("alt_names", "Доп. названия"),
     ("phones", "Телефоны"),
@@ -22,26 +24,24 @@ HEADERS = [
     ("url", "URL"),
 ]
 
-_LIST_FIELDS = {"alt_names", "phones", "landmarks", "activity_types"}
 
-
-def _cell(company: Company, field: str) -> str:
+def _get_value(company: Company, field: str) -> str:
     value = getattr(company, field, None)
     if value is None:
         return ""
-    if field in _LIST_FIELDS:
+    if isinstance(value, list):
         return " | ".join(str(v) for v in value)
     return str(value)
 
 
-def export_csv(companies: list[Company], path: str) -> str:
-    output_path = Path(path).with_suffix(".csv")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+def export_csv(companies: list[Company], output_path: str) -> str:
+    path = Path(output_path).with_suffix(".csv")
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open("w", newline="", encoding="utf-8-sig") as f:
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f, delimiter=";")
-        writer.writerow([label for _, label in HEADERS])
+        writer.writerow([header for _, header in COLUMNS])
         for company in companies:
-            writer.writerow([_cell(company, field) for field, _ in HEADERS])
+            writer.writerow([_get_value(company, field) for field, _ in COLUMNS])
 
-    return str(output_path)
+    return str(path)
