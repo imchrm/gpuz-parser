@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "goldenpages-scraper"
+version = "0.1.0"
+description = "Scraper for goldenpages.uz"
+authors = ["imchrm"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.32"
+beautifulsoup4 = "^4.12"
+lxml = "^5.2"
+pydantic = "^2.7"
+openpyxl = "^3.1"
+tenacity = "^8.3"
+rich = "^13.7"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2"
+mypy = "^1.10"
