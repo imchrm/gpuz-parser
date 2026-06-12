@@ -34,12 +34,14 @@ def get_total_count(html: str) -> int:
     match = re.search(r"Найдено организаций:\s*(\d+)", str(text_node))
     if match:
         return int(match.group(1))
-    # Try parent element text
-    if text_node.parent:
-        full_text = text_node.parent.get_text(strip=True)
-        match2 = re.search(r"Найдено организаций:\s*(\d+)", full_text)
-        if match2:
-            return int(match2.group(1))
+    # Walk up ancestors until the number is found in combined text
+    node = text_node.parent
+    while node and node.name not in ("body", "html", "[document]"):
+        full_text = node.get_text(strip=True)
+        m = re.search(r"Найдено организаций:\s*(\d+)", full_text)
+        if m:
+            return int(m.group(1))
+        node = node.parent
     return 0
 
 
