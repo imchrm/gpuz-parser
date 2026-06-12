@@ -233,16 +233,19 @@ def _parse_working_hours(soup: BeautifulSoup) -> list[WorkingHours]:
 
 
 def _parse_external_links(soup: BeautifulSoup) -> tuple[Optional[str], Optional[str]]:
+    # Link text contains the domain (e.g. "cabinet.veoliaenergy.uz"), not title.
+    # Prepend https:// when the text looks like a bare domain/path.
     website: Optional[str] = None
     telegram: Optional[str] = None
     for tag in soup.find_all("a", href=re.compile(r"/go/\?u=")):
-        href = tag.get("href", "")
-        title = tag.get("title", "")
         text = tag.get_text(strip=True)
-        if "t.me" in title or "t.me" in text or "telegram" in title.lower():
+        if not text:
+            continue
+        url = text if text.startswith("http") else f"https://{text}"
+        if "t.me/" in text or "telegram" in text.lower():
             if telegram is None:
-                telegram = href
+                telegram = url
         else:
             if website is None:
-                website = href
+                website = url
     return website, telegram
