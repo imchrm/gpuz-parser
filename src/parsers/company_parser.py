@@ -102,7 +102,7 @@ def _parse_building(soup: BeautifulSoup) -> Optional[str]:
     street_tag = soup.find("a", href=re.compile(r"/street/\?Id="))
     if not street_tag:
         return None
-    # Building number is usually the text node immediately after the street link
+    # Building number is the text node immediately after the street link
     next_node = street_tag.next_sibling
     if next_node:
         text = str(next_node).strip().lstrip(",").strip()
@@ -125,7 +125,8 @@ def _parse_landmarks(soup: BeautifulSoup) -> list[str]:
 def _parse_rubrics(soup: BeautifulSoup) -> tuple[list[str], list[int]]:
     activity_types: list[str] = []
     rubric_ids: list[int] = []
-    for tag in soup.find_all("a", href=re.compile(r"/rubrics/\?Id=")):
+    # Anchor to relative paths only — avoids picking up absolute-URL nav links
+    for tag in soup.find_all("a", href=re.compile(r"^/rubrics/\?Id=")):
         text = tag.get_text(strip=True)
         href = tag.get("href", "")
         parsed = urlparse(href)
@@ -145,19 +146,23 @@ def _parse_inn(soup: BeautifulSoup) -> Optional[str]:
     text_node = soup.find(string=re.compile(r"ИНН:"))
     if not text_node:
         return None
-    parent = text_node.parent
-    if not parent:
-        return None
-    full_text = parent.get_text(strip=True)
-    match = re.search(r"ИНН:\s*(\S+)", full_text)
-    return match.group(1) if match else None
+    # Walk up ancestors until the INN value appears in combined text
+    node = text_node.parent
+    while node and node.name not in ("body", "html", "[document]"):
+        full_text = node.get_text(strip=True)
+        match = re.search(r"ИНН:\s*(\S+)", full_text)
+        if match:
+            return match.group(1)
+        node = node.parent
+    return None
 
 
 def _parse_years(soup: BeautifulSoup) -> Optional[int]:
-    text_node = soup.find(string=re.compile(r"\d+\s+лет\s+на\s+сайте"))
+    # Matches "5 лет", "2 года", "1 год" на сайте
+    text_node = soup.find(string=re.compile(r"\d+\s+(?:лет|год[а]?)\s+на\s+сайте"))
     if not text_node:
         return None
-    match = re.search(r"(\d+)\s+лет\s+на\s+сайте", str(text_node))
+    match = re.search(r"(\d+)\s+(?:лет|год[а]?)\s+на\s+сайте", str(text_node))
     return int(match.group(1)) if match else None
 
 
@@ -177,8 +182,11 @@ def _parse_last_updated(soup: BeautifulSoup) -> Optional[str]:
 
 
 def _parse_rating(soup: BeautifulSoup) -> Optional[float]:
-    # Rating is typically in a span/div with numeric content near review section
-    tag = soup.find(class_=re.compile(r"rating|stars", re.I))
+    # Numeric rating in dedicated count element (e.g. class="review_all__count")
+    tag = soup.find(class_=re.compile(r"review_all__count", re.I))
+    if not tag:
+        # Fallback for alternative markup
+        tag = soup.find(class_=re.compile(r"rating|stars", re.I))
     if not tag:
         return None
     text = tag.get_text(strip=True)
@@ -192,18 +200,61 @@ def _parse_rating(soup: BeautifulSoup) -> Optional[float]:
 
 
 def _parse_review_count(soup: BeautifulSoup) -> Optional[int]:
-    text_node = soup.find(string=re.compile(r"отзыв", re.I))
-    if not text_node:
-        return None
-    match = re.search(r"(\d+)", str(text_node))
-    return int(match.group(1)) if match else None
+    # Real page uses "оценок: N | отзывов: N" pattern
+    text_node = soup.find(string=re.compile(r"оценок:\s*\d+"))
+    if text_node:
+        match = re.search(r"оценок:\s*(\d+)", str(text_node))
+        if match:
+            return int(match.group(1))
+    # Fallback: any text node with a number near "отзыв"
+    text_node = soup.find(string=re.compile(r"\d+.*отзыв|\bотзыв.*\d+", re.I))
+    if text_node:
+        match = re.search(r"(\d+)", str(text_node))
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def _parse_working_hours(soup: BeautifulSoup) -> list[WorkingHours]:
     hours: list[WorkingHours] = []
-    # Look for table rows with day names
-    rows = soup.find_all("tr")
-    for row in rows:
+
+    # Real site uses <div class="gp_work_wrap"> rows inside a gp_work_time container
+    work_section = soup.find(class_="gp_work_time")
+    if work_section and hasattr(work_section, "find_all"):
+        for row in work_section.find_all(class_="gp_work_wrap"):  # type: ignore[union-attr]
+            classes = row.get("class") or []
+            if "fw-600" in classes:
+                continue  # header row
+            cols = row.find_all("div", recursive=False)
+            # "Сегодня" badge appears as an extra first col on the current day's row
+            if cols and cols[0].get_text(strip=True) == "Сегодня":
+                cols = cols[1:]
+            if len(cols) < 2:
+                continue
+            day_text = cols[0].get_text(strip=True).rstrip(":")
+            time_text = cols[1].get_text(strip=True)
+            if re.search(r"выходн", time_text, re.I):
+                hours.append(WorkingHours(day=day_text, is_day_off=True))
+                continue
+            # Times are formatted as "09.00 - 18.00" (dots), normalize to colons
+            time_match = re.match(r"(\d{2}[.:]\d{2})\s*[-–]\s*(\d{2}[.:]\d{2})", time_text)
+            if time_match:
+                open_t = time_match.group(1).replace(".", ":")
+                close_t = time_match.group(2).replace(".", ":")
+                wh = WorkingHours(day=day_text, open_time=open_t, close_time=close_t)
+                if len(cols) >= 3:
+                    lunch_text = cols[2].get_text(strip=True)
+                    lunch_match = re.match(
+                        r"(\d{2}[.:]\d{2})\s*[-–]\s*(\d{2}[.:]\d{2})", lunch_text
+                    )
+                    if lunch_match:
+                        wh.lunch_start = lunch_match.group(1).replace(".", ":")
+                        wh.lunch_end = lunch_match.group(2).replace(".", ":")
+                hours.append(wh)
+        return hours
+
+    # Fallback: table-based layout (alternative markup)
+    for row in soup.find_all("tr"):
         cells = row.find_all("td")
         if len(cells) < 2:
             continue
@@ -214,38 +265,40 @@ def _parse_working_hours(soup: BeautifulSoup) -> list[WorkingHours]:
         if re.search(r"выходн", time_text, re.I):
             hours.append(WorkingHours(day=day_text, is_day_off=True))
             continue
-        # Try to parse open-close and lunch times
-        time_match = re.match(r"(\d{2}:\d{2})\s*[-–]\s*(\d{2}:\d{2})", time_text)
+        time_match = re.match(r"(\d{2}[.:]\d{2})\s*[-–]\s*(\d{2}[.:]\d{2})", time_text)
         if time_match:
-            wh = WorkingHours(
-                day=day_text,
-                open_time=time_match.group(1),
-                close_time=time_match.group(2),
-            )
+            open_t = time_match.group(1).replace(".", ":")
+            close_t = time_match.group(2).replace(".", ":")
+            wh = WorkingHours(day=day_text, open_time=open_t, close_time=close_t)
             lunch_match = re.search(
-                r"обед[:\s]*(\d{2}:\d{2})\s*[-–]\s*(\d{2}:\d{2})", time_text, re.I
+                r"обед[:\s]*(\d{2}[.:]\d{2})\s*[-–]\s*(\d{2}[.:]\d{2})", time_text, re.I
             )
             if lunch_match:
-                wh.lunch_start = lunch_match.group(1)
-                wh.lunch_end = lunch_match.group(2)
+                wh.lunch_start = lunch_match.group(1).replace(".", ":")
+                wh.lunch_end = lunch_match.group(2).replace(".", ":")
             hours.append(wh)
     return hours
 
 
 def _parse_external_links(soup: BeautifulSoup) -> tuple[Optional[str], Optional[str]]:
-    # Link text contains the domain (e.g. "cabinet.veoliaenergy.uz"), not title.
-    # Prepend https:// when the text looks like a bare domain/path.
+    # Company website links have title="Перейти на сайт"; the URL is in the link text.
+    # Telegram links have title="Telegram" with an SVG icon and no readable text.
+    # Other /go/ links (site nav, social icons) have no title — skip them.
     website: Optional[str] = None
     telegram: Optional[str] = None
     for tag in soup.find_all("a", href=re.compile(r"/go/\?u=")):
+        title = (tag.get("title") or "").strip()
         text = tag.get_text(strip=True)
-        if not text:
-            continue
-        url = text if text.startswith("http") else f"https://{text}"
-        if "t.me/" in text or "telegram" in text.lower():
+        href = str(tag.get("href", ""))
+
+        if title == "Telegram":
             if telegram is None:
-                telegram = url
-        else:
-            if website is None:
-                website = url
+                if text:
+                    telegram = text if text.startswith("http") else f"https://{text}"
+                else:
+                    # SVG-only icon — store the goldenpages redirect as fallback
+                    telegram = BASE_URL + href
+        elif title == "Перейти на сайт":
+            if text and website is None:
+                website = text if text.startswith("http") else f"https://{text}"
     return website, telegram
