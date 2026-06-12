@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import re
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -9,18 +12,20 @@ from src.models import Company, WorkingHours
 
 def parse_company_page(html: str, company_id: int) -> Company:
     soup = BeautifulSoup(html, "lxml")
+    url = f"{BASE_URL}/company/?Id={company_id}"
 
     name = _parse_name(soup)
     alt_names = _parse_alt_names(soup)
     city = _parse_link_text(soup, "/city/?Id=")
-    region = _parse_link_text(soup, "/region/?Id=")
     district = _parse_link_text(soup, "/district/?Id=")
-    street, building = _parse_street_and_building(soup)
+    street = _parse_link_text(soup, "/street/?Id=")
+    building = _parse_building(soup)
     postal_code = _parse_link_text(soup, "/orgbyindex/?Id=")
+    region = _parse_link_text(soup, "/region/?Id=")
     landmarks = _parse_landmarks(soup)
     activity_types, rubric_ids = _parse_rubrics(soup)
     inn = _parse_inn(soup)
-    years_on_site = _parse_years_on_site(soup)
+    years_on_site = _parse_years(soup)
     last_updated = _parse_last_updated(soup)
     rating = _parse_rating(soup)
     review_count = _parse_review_count(soup)
@@ -29,15 +34,15 @@ def parse_company_page(html: str, company_id: int) -> Company:
 
     return Company(
         company_id=company_id,
-        url=f"{BASE_URL}/company/?Id={company_id}",
+        url=url,
         name=name,
         alt_names=alt_names,
         city=city,
-        region=region,
         district=district,
         street=street,
         building=building,
         postal_code=postal_code,
+        region=region,
         landmarks=landmarks,
         activity_types=activity_types,
         rubric_ids=rubric_ids,
@@ -68,7 +73,7 @@ def _parse_name(soup: BeautifulSoup) -> Optional[str]:
     if not h1:
         return None
     text = h1.get_text(strip=True)
-    # Remove trailing city name in parentheses, e.g. "Company Name (Tashkent)"
+    # Remove trailing city in parentheses e.g. "Company Name (Ташкент)"
     text = re.sub(r"\s*\([^)]+\)\s*$", "", text).strip()
     return text or None
 
@@ -83,7 +88,7 @@ def _parse_alt_names(soup: BeautifulSoup) -> list[str]:
     text = sibling.get_text(strip=True)
     if not text:
         return []
-    return [part.strip() for part in text.split(";") if part.strip()]
+    return [s.strip() for s in text.split(";") if s.strip()]
 
 
 def _parse_link_text(soup: BeautifulSoup, path: str) -> Optional[str]:
@@ -93,100 +98,110 @@ def _parse_link_text(soup: BeautifulSoup, path: str) -> Optional[str]:
     return tag.get_text(strip=True) or None
 
 
-def _parse_street_and_building(soup: BeautifulSoup) -> tuple[Optional[str], Optional[str]]:
-    street_tag = soup.find("a", href=re.compile(re.escape("/street/?Id=")))
+def _parse_building(soup: BeautifulSoup) -> Optional[str]:
+    street_tag = soup.find("a", href=re.compile(r"/street/\?Id="))
     if not street_tag:
-        return None, None
-    street = street_tag.get_text(strip=True) or None
-
-    # Building number is the next text node after the street link
-    building: Optional[str] = None
+        return None
+    # Building number is usually the text node immediately after the street link
     next_node = street_tag.next_sibling
-    if next_node and isinstance(next_node, str):
-        building_text = next_node.strip().lstrip(",").strip()
-        building = building_text or None
-
-    return street, building
+    if next_node:
+        text = str(next_node).strip().lstrip(",").strip()
+        return text or None
+    return None
 
 
 def _parse_landmarks(soup: BeautifulSoup) -> list[str]:
-    label = soup.find(string=re.compile(r"Ориентиры:"))
-    if not label:
+    text_node = soup.find(string=re.compile(r"Ориентиры:"))
+    if not text_node:
         return []
-    parent = label.parent
+    parent = text_node.parent
     if not parent:
         return []
-    text = parent.get_text(strip=True)
-    text = re.sub(r"^Ориентиры:\s*", "", text)
-    return [part.strip() for part in text.split(";") if part.strip()]
+    full_text = parent.get_text(strip=True)
+    part = full_text.split("Ориентиры:", 1)[-1].strip()
+    return [s.strip() for s in part.split(";") if s.strip()]
 
 
 def _parse_rubrics(soup: BeautifulSoup) -> tuple[list[str], list[int]]:
     activity_types: list[str] = []
     rubric_ids: list[int] = []
     for tag in soup.find_all("a", href=re.compile(r"/rubrics/\?Id=")):
+        text = tag.get_text(strip=True)
         href = tag.get("href", "")
-        match = re.search(r"Id=(\d+)", href)
-        if match:
-            rubric_ids.append(int(match.group(1)))
-            activity_types.append(tag.get_text(strip=True))
+        parsed = urlparse(href)
+        qs = parse_qs(parsed.query)
+        ids = qs.get("Id", [])
+        if ids:
+            try:
+                rubric_ids.append(int(ids[0]))
+            except ValueError:
+                pass
+        if text:
+            activity_types.append(text)
     return activity_types, rubric_ids
 
 
 def _parse_inn(soup: BeautifulSoup) -> Optional[str]:
-    label = soup.find(string=re.compile(r"ИНН:"))
-    if not label:
+    text_node = soup.find(string=re.compile(r"ИНН:"))
+    if not text_node:
         return None
-    parent = label.parent
+    parent = text_node.parent
     if not parent:
         return None
-    text = parent.get_text(strip=True)
-    match = re.search(r"ИНН:\s*(\S+)", text)
+    full_text = parent.get_text(strip=True)
+    match = re.search(r"ИНН:\s*(\S+)", full_text)
     return match.group(1) if match else None
 
 
-def _parse_years_on_site(soup: BeautifulSoup) -> Optional[int]:
-    match_tag = soup.find(string=re.compile(r"\d+\s+лет на сайте"))
-    if not match_tag:
+def _parse_years(soup: BeautifulSoup) -> Optional[int]:
+    text_node = soup.find(string=re.compile(r"\d+\s+лет\s+на\s+сайте"))
+    if not text_node:
         return None
-    match = re.search(r"(\d+)\s+лет на сайте", str(match_tag))
+    match = re.search(r"(\d+)\s+лет\s+на\s+сайте", str(text_node))
     return int(match.group(1)) if match else None
 
 
 def _parse_last_updated(soup: BeautifulSoup) -> Optional[str]:
-    match_tag = soup.find(string=re.compile(r"Обновлено:"))
-    if not match_tag:
+    text_node = soup.find(string=re.compile(r"Обновлено:"))
+    if not text_node:
         return None
-    match = re.search(r"Обновлено:\s*(\d{2}\.\d{2}\.\d{4})", str(match_tag))
-    return match.group(1) if match else None
+    match = re.search(r"Обновлено:\s*(\d{2}\.\d{2}\.\d{4})", str(text_node))
+    if match:
+        return match.group(1)
+    parent = text_node.parent
+    if parent:
+        full_text = parent.get_text(strip=True)
+        match2 = re.search(r"Обновлено:\s*(\d{2}\.\d{2}\.\d{4})", full_text)
+        return match2.group(1) if match2 else None
+    return None
 
 
 def _parse_rating(soup: BeautifulSoup) -> Optional[float]:
-    # Rating is typically in a span or div with a numeric value
-    rating_tag = soup.find(class_=re.compile(r"rating|score", re.I))
-    if not rating_tag:
+    # Rating is typically in a span/div with numeric content near review section
+    tag = soup.find(class_=re.compile(r"rating|stars", re.I))
+    if not tag:
         return None
-    text = rating_tag.get_text(strip=True)
+    text = tag.get_text(strip=True)
     match = re.search(r"(\d+(?:[.,]\d+)?)", text)
     if match:
         try:
             return float(match.group(1).replace(",", "."))
         except ValueError:
-            return None
+            pass
     return None
 
 
 def _parse_review_count(soup: BeautifulSoup) -> Optional[int]:
-    review_tag = soup.find(string=re.compile(r"\d+\s+отзыв"))
-    if not review_tag:
+    text_node = soup.find(string=re.compile(r"отзыв", re.I))
+    if not text_node:
         return None
-    match = re.search(r"(\d+)\s+отзыв", str(review_tag))
+    match = re.search(r"(\d+)", str(text_node))
     return int(match.group(1)) if match else None
 
 
 def _parse_working_hours(soup: BeautifulSoup) -> list[WorkingHours]:
     hours: list[WorkingHours] = []
-    # Working hours are typically in a table with day rows
+    # Look for table rows with day names
     rows = soup.find_all("tr")
     for row in rows:
         cells = row.find_all("td")
@@ -196,34 +211,24 @@ def _parse_working_hours(soup: BeautifulSoup) -> list[WorkingHours]:
         if not day_text:
             continue
         time_text = cells[1].get_text(strip=True)
-        if re.search(r"выходной|closed", time_text, re.I):
+        if re.search(r"выходн", time_text, re.I):
             hours.append(WorkingHours(day=day_text, is_day_off=True))
             continue
-        # Parse time ranges like "09:00-18:00" or "09:00-13:00 14:00-18:00"
-        time_parts = time_text.split()
-        open_time: Optional[str] = None
-        close_time: Optional[str] = None
-        lunch_start: Optional[str] = None
-        lunch_end: Optional[str] = None
-        ranges = [p for p in time_parts if re.match(r"\d{2}:\d{2}-\d{2}:\d{2}", p)]
-        if len(ranges) >= 1:
-            parts = ranges[0].split("-")
-            open_time = parts[0]
-            close_time = parts[1]
-        if len(ranges) >= 2:
-            # Second range is after lunch break — first range ends at lunch_start
-            lunch_parts = ranges[1].split("-")
-            lunch_start = close_time
-            lunch_end = lunch_parts[0]
-            close_time = lunch_parts[1]
-        if open_time:
-            hours.append(WorkingHours(
+        # Try to parse open-close and lunch times
+        time_match = re.match(r"(\d{2}:\d{2})\s*[-–]\s*(\d{2}:\d{2})", time_text)
+        if time_match:
+            wh = WorkingHours(
                 day=day_text,
-                open_time=open_time,
-                close_time=close_time,
-                lunch_start=lunch_start,
-                lunch_end=lunch_end,
-            ))
+                open_time=time_match.group(1),
+                close_time=time_match.group(2),
+            )
+            lunch_match = re.search(
+                r"обед[:\s]*(\d{2}:\d{2})\s*[-–]\s*(\d{2}:\d{2})", time_text, re.I
+            )
+            if lunch_match:
+                wh.lunch_start = lunch_match.group(1)
+                wh.lunch_end = lunch_match.group(2)
+            hours.append(wh)
     return hours
 
 
@@ -232,9 +237,9 @@ def _parse_external_links(soup: BeautifulSoup) -> tuple[Optional[str], Optional[
     telegram: Optional[str] = None
     for tag in soup.find_all("a", href=re.compile(r"/go/\?u=")):
         href = tag.get("href", "")
-        title = tag.get("title", "").lower()
-        text = tag.get_text(strip=True).lower()
-        if "t.me" in title or "telegram" in title or "t.me" in text or "telegram" in text:
+        title = tag.get("title", "")
+        text = tag.get_text(strip=True)
+        if "t.me" in title or "t.me" in text or "telegram" in title.lower():
             if telegram is None:
                 telegram = href
         else:
