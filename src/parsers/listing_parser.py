@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -45,20 +45,24 @@ def get_total_count(html: str) -> int:
 
 def get_next_page_url(html: str, base_url: str) -> str | None:
     soup = BeautifulSoup(html, "lxml")
-    # Look for "Следующая" link
+
+    # Primary: look for "Следующая" link in pagination
     next_tag = soup.find("a", string=re.compile(r"Следующ", re.I))
     if next_tag:
         href = next_tag.get("href", "")
         if href:
             return urljoin(base_url, str(href))
-    # Look for pagination links and find next page number
+
+    # Fallback: find active page in paginator, increment Page param
+    # robots.txt Clean-param confirms pagination uses "Page" (capital P)
     paginator = soup.find(class_=re.compile(r"paginat|pagination|pager", re.I))
-    if paginator and isinstance(paginator, BeautifulSoup.__class__) or paginator:
-        current_tag = paginator.find(class_=re.compile(r"active|current|selected", re.I)) if hasattr(paginator, 'find') else None  # type: ignore[union-attr]
+    if paginator and hasattr(paginator, "find"):
+        current_tag = paginator.find(class_=re.compile(r"active|current|selected", re.I))  # type: ignore[union-attr]
         if current_tag:
             next_sibling = current_tag.find_next_sibling("a")
             if next_sibling:
                 href = next_sibling.get("href", "")
                 if href:
                     return urljoin(base_url, str(href))
+
     return None

@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 SEARCH_URL = f"{BASE_URL}/search/"
 
+# WARNING: /search/* is blocked by robots.txt (Disallow: */search/*).
+# Use rubric or city collectors instead.
+
 
 def collect_keyword(
     session: requests.Session,
